@@ -5,9 +5,6 @@ import numpy as np
 import matplotlib.pyplot as plt
 import networkx as nx
 
-from icecream import ic
-
-# Configure logging
 logging.basicConfig(level=logging.INFO, format='%(message)s')
 
 class Problem:
