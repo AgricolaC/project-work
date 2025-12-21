@@ -5,7 +5,7 @@ import numpy as np
 import matplotlib.pyplot as plt
 import networkx as nx
 
-logging.basicConfig(level=logging.INFO, format='%(message)s')
+from icecream import ic
 
 class Problem:
     _graph: nx.Graph
