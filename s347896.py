@@ -23,13 +23,36 @@ def solution(p: Problem):
     # --- Gravity-Aware Budgeting ---
     # Estimate Effective Problem Size (Virtual Nodes)
     # Replicate log-stable formula from solver.py to predict N_virt where Alpha increases genome size
-    avg_dist = 0.5 # Approximate average distance to base (conservative)
-    avg_gold = 500 # Approximate average gold (range 1-1000)
+    # Calculate EXACT averages from the specific instance to ensure Gravity Check matches Reality
+    # Gold
+    golds = nx.get_node_attributes(g, 'gold')
+    # Use only real cities (1 to N-1) for gold stats (node 0 has 0 gold)
+    real_golds = [golds[i] for i in range(1, N)]
+    avg_gold = np.mean(real_golds) if real_golds else 500.0
     
-    if beta > 1.05:
-        # Use exact analytic formula from solver
-        estimated_split_factor = 1 + np.log1p(alpha * avg_gold * avg_dist) * (beta - 1.0)
-        estimated_split_factor = max(1.0, min(estimated_split_factor, 100.0))
+    # Distance to Depot (Node 0)
+    # Since graph might be sparse, we compute it from positions for estimation accuracy
+    pos = nx.get_node_attributes(g, 'pos')
+    depot_pos = np.array(pos[0])
+    dists = []
+    for i in range(1, N):
+        node_pos = np.array(pos[i])
+        d = np.linalg.norm(node_pos - depot_pos)
+        dists.append(d)
+    avg_dist = np.mean(dists) if dists else 0.5
+    
+    if beta > 1.001:
+        # Match the Analytic Formula from solver.py
+        # Estimated factor per node
+        term1 = (beta - 1.0) ** (1.0 / beta)
+        term2 = alpha * avg_gold
+        term3 = avg_dist ** (1.0 - 1.0 / beta)
+        
+        # Scaling factor matching solver.py (0.5 dampener)
+        estimated_split_factor = 0.5 * term1 * term2 * term3
+        
+        # Helper to keep estimate rational (max 40 splits per node)
+        estimated_split_factor = max(1.0, min(estimated_split_factor, 40.0))
     else:
         estimated_split_factor = 1.0
 
@@ -45,9 +68,19 @@ def solution(p: Problem):
     complexity = size_factor * beta_factor * density_penalty
     
     # 2. Define Computational Budget
-    # Base budget scaled by complexity, clamped to reasonable limits
+    # Base budget scaled by complexity
     raw_budget = 2000 * complexity
-    total_evals = int(np.clip(raw_budget, 5000, 15000))
+
+    # RUNTIME PROTECTION:
+    # As N_virt grows, the cost per evaluation grows linearly.
+    # To prevent runtime explosion, we scale DOWN the number of evaluations as N_virt increases.
+    # Logic: Keep roughly constant "total operations" rather than constant "quality".
+    # Factor = 200 / (200 + N_virt) => 1.0 at N=0, 0.5 at N=200, 0.2 at N=800
+    runtime_scaler = 200.0 / (200.0 + N_virt)
+    
+    total_evals = raw_budget * runtime_scaler
+    # Clamp to safe limits (min 3000 to ensure convergence, max 20000)
+    total_evals = int(np.clip(total_evals, 3000, 20000))
 
     # 3. Determine Population Geometry
     # Adjust aspect ratio (Pop vs Gens) based on Density and Beta
@@ -66,11 +99,13 @@ def solution(p: Problem):
 
     pop_size_per_island = int(total_pop / num_islands)
 
-    print(f"_"*60)
-    print(f"Instance Analysis   | N={N:<3} A={alpha:<4.1f} B={beta:<4.1f} D={density:<4.2f} => C={complexity:.2f}")
-    print(f"Gravity Check       | N_virt={int(N_virt)} (Split Factor: {estimated_split_factor:.2f}x)")
-    print(f"Adaptive Config     | Budget={total_evals:<5} Pop={total_pop:<3} ({pop_size_per_island}/isl) Gens={generations:<3}")
-    print(f"_"*60)
+    print(f"\n{'='*30} SOLVER CONFIGURATION {'='*30}")
+    print(f"[Instance]  N={N:<4} | Alpha={alpha:<4.1f} | Beta={beta:<4.1f} | Density={density:<4.2f}")
+    print(f"[Stats]     Avg Dist={avg_dist:<.3f} | Avg Gold={avg_gold:<.1f}")
+    print(f"[Estimate]  Complexity Factor: {complexity:.2f}")
+    print(f"[Planning]  Est. Virtual Nodes: ~{int(N_virt)} (Split Factor: {estimated_split_factor:.2f}x)")
+    print(f"[Budget]    Total Evals: {total_evals} | Pop: {total_pop} ({pop_size_per_island}/isl) | Gens: {generations}")
+    print(f"{'='*82}\n")
 
     # Prepare Seeds (Real Nodes)
     # 1. Identity
@@ -132,7 +167,7 @@ def solution(p: Problem):
         seeds.append(nn_seed)
 
     # Run Solver with Seeds
-    sim = GA_Solver(p, pop_size_per_island=pop_size_per_island, max_generations=generations, initial_individuals=seeds) 
+    sim = GA_Solver(p, pop_size_per_island=pop_size_per_island, max_generations=generations, initial_individuals=seeds, seed=42) 
 
     for _ in range(generations):
         sim.step_generation()
@@ -161,38 +196,6 @@ def solution(p: Problem):
     # Granular expansion
     cost, expanded_path = granular_path_expansion(p, full_tour, sim.virtual_map, sim.node_golds)
     
-    # Format for submission: (node, quantity_taken)
-    # The solver logic assumes we take everything from a node when we visit it as a 'target' in the virtual map.
-    # In the expanded path, we visit nodes.
-    # If a node is visited multiple times or as an intermediate, we take 0.
-    # We need to map back to the decision variables.
-    
-    # Actually, granular_path_expansion returns the sequence of Real Nodes.
-    # We need to assign gold collection.
-    # Strategy: Collect gold only when visiting the node as a primary destination?
-    # Or just greedy collect?
-    # Problem definition: "You can visit any node... capacity is infinite... collect gold"
-    # But collecting gold increases weight.
-    # Strategy: Collect gold at the *last* valid moment or *first*?
-    # Weight penalty means we should collect gold LATER if possible (carry it less distance).
-    # But if we must visit it, we collect it.
-    
-    # Wait, the virtual_cities represent the gold chunks.
-    # If the expanded_path visits real node R, and R corresponds to virtual chunks V1, V2...
-    # The GA decided when to visit V1, V2.
-    # The granular path is a geometric refinement of edges.
-    
-    # Actually, the output format is `(node_id, gold_collected)`.
-    # `granular_path_expansion` returns the physical node sequence.
-    # We need to match this with the gold collection logic.
-    
-    # Simpler approach matching `ablation_study.py` (which just calculates cost):
-    # But `solution` must return the list.
-    
-    # For now, let's trust the GA's visiting order for Gold.
-    # We just inject intermediate nodes with 0 gold.
-    
-    # Re-process with injection directly (copying granular logic but maintaining gold attribution)
     use_granular = beta > 1.0
     
     current_node = 0

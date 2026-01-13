@@ -1,4 +1,3 @@
-
 import logging
 from itertools import combinations
 import time
@@ -97,7 +96,7 @@ class Island:
         # Fill remainder with random individuals
         while len(self.population) < self.pop_size:
             rng_genome = list(self.sim.virtual_cities)
-            np.random.shuffle(rng_genome)
+            self.sim.rng.shuffle(rng_genome)
             self.population.append(Individual(rng_genome, self._sample_params()))
         
         self.evaluate_population()
@@ -147,8 +146,8 @@ class Island:
 
     def _sample_params(self):
         return {
-            'mut_rate': np.random.uniform(*self.priors['mut_rate']),
-            'win_scale': np.random.uniform(*self.priors['win_scale']),
+            'mut_rate': self.sim.rng.uniform(*self.priors['mut_rate']),
+            'win_scale': self.sim.rng.uniform(*self.priors['win_scale']),
             'mut_mix': list(self.priors['mut_mix'])
         }
 
@@ -167,7 +166,7 @@ class Island:
             
             child_params = self._mutate_params(child_params)
             
-            if np.random.random() < child_params['mut_rate']:
+            if self.sim.rng.random() < child_params['mut_rate']:
                 child_genome = self._mutate_genome(child_genome, child_params['mut_mix'])
                 
             child = Individual(child_genome, child_params, self.sim)
@@ -189,19 +188,19 @@ class Island:
             
             while len(survivors) < self.pop_size:
                 rng_genome = list(self.sim.virtual_cities)
-                np.random.shuffle(rng_genome)
+                self.sim.rng.shuffle(rng_genome)
                 survivors.append(Individual(rng_genome, self._sample_params()))
                 
             self.population = survivors
             self.evaluate_population()
 
     def _tournament(self, k=3):
-        candidates = [self.population[i] for i in np.random.randint(0, len(self.population), k)]
+        candidates = [self.population[i] for i in self.sim.rng.integers(0, len(self.population), k)]
         return min(candidates, key=lambda x: x.cost)
 
     def _crossover_genome(self, p1, p2):
         size = len(p1)
-        a, b = sorted(np.random.choice(range(size), 2, replace=False))
+        a, b = sorted(self.sim.rng.choice(range(size), 2, replace=False))
         child = [None] * size
         child[a:b+1] = p1[a:b+1]
         
@@ -224,7 +223,7 @@ class Island:
 
     def _crossover_params(self, p1, p2):
         new_params = {}
-        alpha = np.random.random()
+        alpha = self.sim.rng.random()
         for k in ['mut_rate', 'win_scale']:
             new_params[k] = alpha * p1[k] + (1 - alpha) * p2[k]
         
@@ -236,33 +235,33 @@ class Island:
 
     def _mutate_params(self, params):
         tau = 0.1
-        params['mut_rate'] = params['mut_rate'] * np.exp(tau * np.random.normal())
+        params['mut_rate'] = params['mut_rate'] * np.exp(tau * self.sim.rng.normal())
         params['mut_rate'] = np.clip(params['mut_rate'], 0.05, 0.95)
         
-        params['win_scale'] = params['win_scale'] * np.exp(tau * np.random.normal())
+        params['win_scale'] = params['win_scale'] * np.exp(tau * self.sim.rng.normal())
         params['win_scale'] = np.clip(params['win_scale'], 0.3, 2.0)
         
         mix = np.array(params['mut_mix'])
-        noise = np.random.normal(0, 0.1, size=len(mix))
+        noise = self.sim.rng.normal(0, 0.1, size=len(mix))
         mix = np.abs(mix + noise)
         params['mut_mix'] = list(mix / mix.sum())
         
         return params
 
     def _mutate_genome(self, genome, mix):
-        op = np.random.choice(['swap', 'inv', 'scramble'], p=mix)
+        op = self.sim.rng.choice(['swap', 'inv', 'scramble'], p=mix)
         size = len(genome)
         
         if op == 'swap':
-            i, j = np.random.choice(range(size), 2, replace=False)
+            i, j = self.sim.rng.choice(range(size), 2, replace=False)
             genome[i], genome[j] = genome[j], genome[i]
         elif op == 'inv':
-            i, j = sorted(np.random.choice(range(size), 2, replace=False))
+            i, j = sorted(self.sim.rng.choice(range(size), 2, replace=False))
             genome[i:j+1] = genome[i:j+1][::-1]
         elif op == 'scramble':
-            i, j = sorted(np.random.choice(range(size), 2, replace=False))
+            i, j = sorted(self.sim.rng.choice(range(size), 2, replace=False))
             sub = genome[i:j+1]
-            np.random.shuffle(sub)
+            self.sim.rng.shuffle(sub)
             genome[i:j+1] = sub
         return genome
 
@@ -270,11 +269,12 @@ class GA_Solver:
     """
     Main orchestration class. Handles the Problem, Virtual Node creation, and manages the Islands.
     """
-    def __init__(self, problem, pop_size_per_island=30, max_generations=100, initial_individuals=None, ablation_config=None):
+    def __init__(self, problem, pop_size_per_island=30, max_generations=100, initial_individuals=None, ablation_config=None, seed=42):
         self.problem = problem
         self.pop_size = pop_size_per_island
         self.max_generations = max_generations
         self.initial_individuals = initial_individuals or []
+        self.rng = np.random.default_rng(seed)
         
         # Ablation Config (Default: All Enabled)
         self.ablation_config = {
@@ -282,11 +282,47 @@ class GA_Solver:
             'chunking': True,
             'seeding': True
         }
+        
+        # Threshold for usage of advanced physics (multi-hop approximation)
+        self.multi_hop_threshold = 1.0
         if ablation_config:
             self.ablation_config.update(ablation_config)
             
         # Optimization: Cache graph to avoid expensive property copy in original problem.py
         self.cached_graph = problem.graph
+
+        # Estimate average edge length for cost approximation
+        # We can just sample edges if too many, but for N=2000 iterating all edges is fine.
+        # But wait, problem.graph might be dense.
+        # N=2000, max edges = 2 million. Iterating 2M edges is fast (fraction of second).
+        
+        edge_lengths = [d['dist'] for u, v, d in self.cached_graph.edges(data=True)]
+        if len(edge_lengths) > 0:
+            self.avg_edge_len = np.mean(edge_lengths)
+            # If the graph is sparse but connected via long edges, this might be large.
+            # But the granular expansion uses 'atomic' steps.
+            # If avg_edge_len is too large, our k will be small.
+            # Let's be conservative: use a smaller percentile or a fixed small value?
+            # Problem says "unit square coordinates".
+            # If we want to really approximate "atomic" cost, we should estimate
+            # how many "hops" are in a shortest path of length L.
+            # The hops are determined by the DENSITY of the graph.
+            # If density is high, we can jump directly (1 hop).
+            # But high beta penalizes 1 big jump.
+            # So the agent WANTS multiple small jumps.
+            # Are there intermediate nodes?
+            # If density=1.0, direct edge exists. But triangular inequality holds for dist.
+            # So dist(A,B) <= dist(A,C) + dist(C,B).
+            # But Cost(A,B) > Cost(A,C) + Cost(C,B) if beta > 1.
+            # So we WANT to find C.
+            # The graph contains "random" points.
+            # We can treat the field as a "sea" of points.
+            # The expected distance to nearest neighbor is ~ 1/sqrt(N).
+            # For N=1000, 1/31 ~= 0.03.
+            # So we can assume we can find hops of length ~0.05 easily.
+            self.avg_edge_len = max(0.05, float(np.percentile(edge_lengths, 10)))
+        else:
+             self.avg_edge_len = 0.1
 
         # Optimization: Precompute distance matrix
         n_nodes = self.cached_graph.number_of_nodes()
@@ -360,7 +396,7 @@ class GA_Solver:
         # Updated Logic: Disable below Beta=1.25 unless forcibly enabled by ablation
         chunking_enabled = self.ablation_config.get('chunking', True)
         
-        if beta <= 1.05 or not chunking_enabled:
+        if beta <= self.multi_hop_threshold or not chunking_enabled:
             vid_counter = 1
             for c in range(1, n_cities):
                 self.virtual_cities.append(vid_counter)
@@ -383,32 +419,41 @@ class GA_Solver:
                 k = 1
                 imp = 0
             else:
-                # Log-Stable Formula
-                raw_k = 1 + np.log1p(alpha * weight * dist) * (beta - 1.0)
+                # Rigorous Calculus-Based Formula
+                # C(k) = k*D + k*(alpha*D*g/k)^beta
+                # Optimal k = (beta-1)^(1/beta) * alpha * g * D^(1 - 1/beta)
+                if beta > 1.001:
+                    term1 = (beta - 1.0) ** (1.0 / beta)
+                    term2 = alpha * weight
+                    term3 = dist ** (1.0 - 1.0 / beta)
+                    # DAMPENING FACTOR: Scale optimal k by 0.5 to trade theoretical optimality for GA convergence speed.
+                    raw_k = 0.5 * term1 * term2 * term3
+                else:
+                    raw_k = 1.0
+                
                 k = int(np.floor(raw_k))
                 
-                # Priority Score
-                imp = weight * dist 
-
-            k = max(1, min(k, 50))
+                # Priority Score (Cost Reduction Potential)
+                # How much do we save by chunking? Approx ~ (alpha*D*G)^beta
+                imp = (alpha * weight * dist) ** beta
+            
+            # Reduce per-city cap from 50 to 40
+            k = max(1, min(k, 40))
             requested_splits.append({'c': c, 'k': k, 'imp': imp})
 
-        # 3. Global Safety Cap (Increased to 2000 from 800)
-        MAX_TOTAL_NODES = 2000
+        # 3. Global Safety Cap (Reduced to 400 for Runtime Performance)
+        # We use a soft cap that scales down proportional to importance if we exceed budget.
+        MAX_TOTAL_NODES = 500
         current_total = sum(x['k'] for x in requested_splits)
         
         if current_total > MAX_TOTAL_NODES:
-            requested_splits.sort(key=lambda x: x['imp'], reverse=True)
-            budget_remaining = MAX_TOTAL_NODES - n_cities 
-            
+            # If we exploded the budget (likely with high alpha), 
+            # we scale down k proportional to the overshoot, rather than just filling from top.
+            # This preserves the *relative* distribution of k_opt.
+            scale_factor = MAX_TOTAL_NODES / current_total
             for item in requested_splits:
-                desired_extra = item['k'] - 1
-                if budget_remaining > 0:
-                    grant = min(desired_extra, budget_remaining)
-                    item['k'] = 1 + grant
-                    budget_remaining -= grant
-                else:
-                    item['k'] = 1
+                if item['k'] > 1:
+                    item['k'] = max(1, int(item['k'] * scale_factor))
             
         # 4. Generation
         requested_splits.sort(key=lambda x: x['c'])
@@ -429,7 +474,8 @@ class GA_Solver:
         self.win_base = int(30 / np.sqrt(avg_k))
         self.win_base = max(5, self.win_base)
         
-        logging.info(f"Chunking Configured: {len(self.virtual_cities)} nodes (Beta={beta})")
+        factor = len(self.virtual_cities) / max(1, n_cities - 1)
+        logging.info(f"CHUNKING FINALIZED: {len(self.virtual_cities)} virtual nodes created (Expansion: {factor:.2f}x). Beta={beta}")
 
     def _sanitize_seeds(self):
         """
@@ -509,10 +555,21 @@ class GA_Solver:
             dr = self.get_dist(u, 0)
             current_gold = self.node_golds[u]
             
-            # Calculate Return Cost
-            # Calculate Return Cost (Always use Physics Formula)
-            # Calculate Return Cost (Always use Physics Formula)
-            ret_cost = dr + (self.problem.alpha * dr * current_gold) ** self.problem.beta
+            # --- START FIXED COST LOGIC ---
+            # Multi-Hop Approximation for Beta > 1
+            # If we just do (alpha*dr*g)**beta, it's huge.
+            # Actual path will use k small hops.
+            # Cost approx = k * (dr/k + (alpha * dr/k * g)**beta )
+            #             = dr + k * (alpha * dr/k * g)**beta
+            #             = dr + k^(1-beta) * (alpha * dr * g)**beta
+            
+            if self.problem.beta > self.multi_hop_threshold:
+                k_approx = max(1.0, dr / self.avg_edge_len)
+                penalty_factor = k_approx ** (1.0 - self.problem.beta)
+                ret_cost = dr + penalty_factor * ((self.problem.alpha * dr * current_gold) ** self.problem.beta)
+            else:
+                ret_cost = dr + (self.problem.alpha * dr * current_gold) ** self.problem.beta
+            # --- END FIXED COST LOGIC ---
 
             # Update Bellman for Single Trip
             trip_total = path_cost + ret_cost
@@ -530,11 +587,13 @@ class GA_Solver:
                 
                 # Segment Cost (prev -> new_city)
                 # Carries `current_gold` (load from prev)
-                # Segment Cost (prev -> new_city)
-                # Always use Physics Formula
-                # Segment Cost (prev -> new_city)
-                # Always use Physics Formula
-                seg_cost = d_seg + (self.problem.alpha * d_seg * current_gold) ** self.problem.beta
+                
+                if self.problem.beta > self.multi_hop_threshold:
+                    k_approx = max(1.0, d_seg / self.avg_edge_len)
+                    penalty_factor = k_approx ** (1.0 - self.problem.beta)
+                    seg_cost = d_seg + penalty_factor * ((self.problem.alpha * d_seg * current_gold) ** self.problem.beta)
+                else:
+                    seg_cost = d_seg + (self.problem.alpha * d_seg * current_gold) ** self.problem.beta
                 
                 # Accumulate Forward Path
                 path_cost += seg_cost
@@ -545,9 +604,13 @@ class GA_Solver:
                 
                 # Calculate New Return (new_city -> 0)
                 dr = self.get_dist(new_city, 0)
-                # Calculate New Return (new_city -> 0)
-                # Calculate New Return (new_city -> 0)
-                ret_cost = dr + (self.problem.alpha * dr * current_gold) ** self.problem.beta
+                
+                if self.problem.beta > self.multi_hop_threshold:
+                    k_approx = max(1.0, dr / self.avg_edge_len)
+                    penalty_factor = k_approx ** (1.0 - self.problem.beta)
+                    ret_cost = dr + penalty_factor * ((self.problem.alpha * dr * current_gold) ** self.problem.beta)
+                else:
+                    ret_cost = dr + (self.problem.alpha * dr * current_gold) ** self.problem.beta
                 
                 # Update Bellman for Extended Trip
                 trip_total = path_cost + ret_cost
