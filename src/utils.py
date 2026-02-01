@@ -1,85 +1,55 @@
 import networkx as nx
 
-def granular_path_expansion(problem, tour_sequence, virtual_map, node_golds):
+def reconstruct_route_for_plotting(problem, tour_trips):
     """
-    Refines a tour by expanding edges into atomic steps based on the physical graph.
-    
-    This is necessary for Beta > 1.0 (Convex) where:
-    Cost(A->B) > Cost(A->...->B). Granular steps minimize the beta penalty.
+    Reconstructs the full node-by-node path for visualization purposes.
+    EXPANDS shortest paths between cities.
     
     Args:
         problem: The Problem instance.
-        tour_sequence: List of virtual node IDs (visited sequence).
-        virtual_map: Dict mapping virtual_node_id -> real_node_id.
-        node_golds: Dict mapping virtual_node_id -> gold_amount.
-        
+        tour_trips: List of trips, where each trip is a list of city IDs.
+                   e.g. [[1, 2], [3, 4, 5]]
+    
     Returns:
-        (total_cost, expanded_sequence): The calculated cost and the sequence of real nodes visited.
+        full_route: List of city IDs visited in order, including depot (0) and intermediate nodes.
+                    e.g. [0, ..., 1, ..., 2, ..., 0, ..., 3, ..., 4, ..., 5, ..., 0]
     """
-    if problem.beta <= 1.0:
-        return None, None 
-
-    # 1. Segment tour into trips (Depot -> ... -> Depot)
-    trips = []
-    current_trip = []
-    for node in tour_sequence:
-        if node == 0:
-            if current_trip:
-                trips.append(current_trip)
-                current_trip = []
-        else:
-            current_trip.append(node)
+    g = problem.graph
+    full_route = [0]
     
-    final_sequence = [0]
-    total_cost = 0.0
+    current_node = 0
     
-    for trip in trips:
-        current_load = 0.0
-        current_pos = 0 
+    for trip in tour_trips:
+        # Trip starts from depot (implicitly at current_node=0)
         
-        for next_visit_virtual in trip:
-            next_visit = virtual_map.get(next_visit_virtual, next_visit_virtual)
+        for city in trip:
+            if city == current_node: continue
             
-            if next_visit == current_pos:
-                continue
-
-            # 2. Find path between nodes (Real Graph)
+            # Find path from current -> city
             try:
-                path_segment = nx.shortest_path(problem.graph, source=current_pos, target=next_visit, weight='dist')
+                path = nx.shortest_path(g, current_node, city, weight='dist')
+                # Append path (excluding start which is already added)
+                full_route.extend(path[1:])
+                current_node = city
             except nx.NetworkXNoPath:
-                path_segment = [current_pos, next_visit] 
-
-            # 3. Calculate Cost for Atomic Steps
-            # Path segment: [u, v1, v2...]
-            for i in range(len(path_segment)-1):
-                u, v = path_segment[i], path_segment[i+1]
-                edge_cost = problem.cost([u, v], current_load)
-                total_cost += edge_cost
+                # Fallback if disconnected (shouldn't happen in connected graph)
+                full_route.append(city)
+                current_node = city
                 
-            final_sequence.extend(path_segment[1:])
-            
-            # 4. Update State
-            current_pos = next_visit
-            current_load += node_golds.get(next_visit_virtual, 0)
-            
-        # 5. Return to Depot
-        try:
-            path_back = nx.shortest_path(problem.graph, source=current_pos, target=0, weight='dist')
-        except:
-            path_back = [current_pos, 0]
-            
-        for i in range(len(path_back)-1):
-            u, v = path_back[i], path_back[i+1]
-            edge_cost = problem.cost([u, v], current_load)
-            total_cost += edge_cost
-            
-        final_sequence.extend(path_back[1:])
-        
-    return total_cost, final_sequence
-
+        # Return to depot
+        if current_node != 0:
+            try:
+                path = nx.shortest_path(g, current_node, 0, weight='dist')
+                full_route.extend(path[1:])
+                current_node = 0
+            except nx.NetworkXNoPath:
+                full_route.append(0)
+                current_node = 0
+                
+    return full_route
 
 def calculate_metrics(p, formatted_solution, baseline_cost):
-    """Calculates requested mechanics metrics."""
+    """Calculates basic metrics from the formatted solution [(node, gold), ...]."""
     split_count = 0
     distances = []
     gold_carried = []
@@ -92,7 +62,7 @@ def calculate_metrics(p, formatted_solution, baseline_cost):
          
          if node_id == 0:
              split_count += 1
-             current_gold = 0 # Reset load at base
+             current_gold = 0 
          else:
              current_gold += gold_amt
          
@@ -100,41 +70,20 @@ def calculate_metrics(p, formatted_solution, baseline_cost):
 
     g = p.graph
     
-    # Calculate distances
     for i in range(len(path_nodes) - 1):
         u = path_nodes[i]
         v = path_nodes[i+1]
         
+        dist = 0
         if g.has_edge(u, v):
             dist = g[u][v]['dist']
         else:
             try:
                 dist = nx.shortest_path_length(g, u, v, weight='dist')
-            except nx.NetworkXNoPath:
-                dist = float('inf')
-        
+            except:
+                dist = 0
         distances.append(float(dist))
-
-    # Approximate GA cost for improvement calc
-    ga_cost = 0
-    curr_load = 0
-    current_node = 0 
-    
-    for (next_node, gold_amt) in formatted_solution:
-        try:
-             step_path = nx.shortest_path(g, current_node, next_node, weight='dist')
-             step_cost = p.cost(step_path, curr_load)
-             ga_cost += step_cost
-        except:
-             pass 
-             
-        if next_node == 0:
-            curr_load = 0 
-        else:
-            curr_load += gold_amt 
-            
-        current_node = next_node
-
-    improvement = baseline_cost / ga_cost if ga_cost > 0 else 0.0
-
-    return split_count, distances, gold_carried, improvement
+        
+    # Cost improvement is less relevant if baseline is not comparable, 
+    # but we keep the signature for compatibility.
+    return split_count, distances, gold_carried, 0.0

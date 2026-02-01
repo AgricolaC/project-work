@@ -13,7 +13,6 @@ import numpy as np
 import networkx as nx
 from problem import Problem
 from src.solver import GA_Solver
-from src.utils import granular_path_expansion
 
 logging.basicConfig(level=logging.ERROR, format='%(asctime)s - %(levelname)s - %(message)s')
 
@@ -26,15 +25,22 @@ def run_ablation_study(num_cities, density, beta, alpha=1.0, seed=42):
     # Generate Problem (Fixed seed for reproducibility)
     problem = Problem(num_cities, alpha=alpha, beta=beta, density=density, seed=seed)
     
-    # Calculate Baseline
+    # Calculate Baseline (Simple separate trips)
+    # problem.baseline() usually provides a naive solution
     baseline_cost = problem.baseline()
     
     # Define Configurations
+    # Now that we removed chunking/granular/seeding toggles in the solver logic (except seeding),
+    # we only compare different SEEDING strategies or just run the ONE correct solver.
+    # The user wanted to "Run full pipeline and comparing to baselines".
+    # Since "No Chunking" is now the ONLY mode, the old variants don't make sense physically.
+    # But we can ablate SEEDING and LOCAL SEARCH.
+    
     variants = {
-        "Full System":    {'seeding': True, 'granular': True, 'chunking': True},
-        "No Seeding":     {'seeding': False, 'granular': True, 'chunking': True},
-        #"No Granular":    {'seeding': True, 'granular': False, 'chunking': True},
-       # "No Chunking":    {'seeding': True, 'granular': True, 'chunking': False}
+        "Full System":    {'seeding': True, 'local_search': True},
+        "No Seeding":     {'seeding': False, 'local_search': True},
+        "No LocalSearch": {'seeding': True, 'local_search': False},
+        "Minimal":        {'seeding': False, 'local_search': False}
     }
     
     results = []
@@ -56,9 +62,10 @@ def run_ablation_study(num_cities, density, beta, alpha=1.0, seed=42):
             
         try:
             # Init Solver
+            # We must use permutations of 1..N-1
             solver = GA_Solver(problem, 
-                               pop_size_per_island=50, # Boost pop slightly
-                               max_generations=50,     # Fixed gens for fair comparison
+                               pop_size_per_island=24, 
+                               max_generations=50,     
                                initial_individuals=initial_seeds, 
                                ablation_config=config)
             
@@ -68,31 +75,17 @@ def run_ablation_study(num_cities, density, beta, alpha=1.0, seed=42):
             
             # Extract Solution
             best_ind = solver.global_best
-            raw_cost, tour_trips = solver.split_route(best_ind.genome, 1.0)
             
-            # Flatten tour
-            flat_tour = [0]
-            for t in tour_trips:
-                flat_tour.extend(t)
-                flat_tour.append(0)
-                
-            # Final Cost Calculation
-            # 1. Standard (solver reported) - This is the "Fantasy" cost if Granular Physics is enabled
-            ga_prediction = raw_cost
+            # Recalculate cost using split_route to be sure (it returns (cost, trips))
+            # The inputs to split_route are (permutation, win_scale).
+            # We use a large window for final eval to get precision.
+            raw_cost, tour_trips = solver.split_route(best_ind.genome, 2.0)
             
-            # 2. Actual Realized Cost
-            # If Beta > 1.0, we must expand the path using the *real* graph.
-            # If the graph is Dense, this will find direct edges and pay the Concvex Penalty.
-            # If the graph is Sparse, this will find detours and get Granular Gains.
-            if beta > 1.0:
-                expanded_cost, _ = granular_path_expansion(problem, flat_tour, solver.virtual_map, solver.node_golds)
-                final_cost = expanded_cost if expanded_cost is not None else ga_prediction
-            else:
-                final_cost = ga_prediction # No difference for Beta <= 1.0
+            # Final Cost is exactly raw_cost because physics are unified now.
+            final_cost = raw_cost
             
             runtime = time.time() - t0
             improvement = baseline_cost / final_cost if final_cost > 0 else 0
-            prediction_error = final_cost - ga_prediction
             
             results.append({
                 'num_cities': num_cities,
@@ -100,9 +93,7 @@ def run_ablation_study(num_cities, density, beta, alpha=1.0, seed=42):
                 'beta': beta,
                 'variant': name,
                 'baseline_cost': baseline_cost,
-                'ga_prediction': ga_prediction, 
                 'final_cost': final_cost,
-                'prediction_error': prediction_error,
                 'improvement': improvement,
                 'runtime': runtime
             })
@@ -124,17 +115,13 @@ def run_ablation_study(num_cities, density, beta, alpha=1.0, seed=42):
 def main():
     experiments = [
         # (N, D, Beta)
-        (50, 0.5, 1.0),   # Linear Baseline
-        #(50, 0.9, 1.0),   # Density Benchmark (Linear)
-        (50, 0.5, 1.1),   # Low Convex Stress
-        #(50, 0.5, 2.0),   # Medium Convex Stress
-        (50, 0.1, 2.0),   # Sparse Stress 
-        (50, 1.0, 2.0),  # Dense Stress 
-        #(50, 0.5, 4.0),   # High Convex Stress
-        (50, 0.5, 0.1),    # Concave Stress
-        (50, 0.9, 0.1),   
-        (50, 0.1, 0.1)   
-        
+        (20, 0.5, 1.0),   
+        (20, 0.5, 1.1),   
+        (20, 0.1, 2.0),   
+        (20, 1.0, 2.0),  
+        (20, 0.5, 0.1),    
+        (20, 0.9, 0.1),   
+        (20, 0.1, 0.1)   
     ]
     all_results = []
     
@@ -144,9 +131,8 @@ def main():
         all_results.extend(res)
         
     # Save
-    csv_file = 'src/results/ablation_results.csv'
+    csv_file = 'src/early_results/ablation_results.csv'
     if all_results:
-        # Collect all keys
         all_keys = set()
         for r in all_results:
             all_keys.update(r.keys())
@@ -159,13 +145,11 @@ def main():
             
     print(f"\n--- Ablation Study Complete. Results saved to {csv_file} ---")
     
-    # Simple Table Print
-    print(f"{'Variant':<15} | {'D':<3} | {'Beta':<5} | {'PredErr':<10} | {'Imp':<6} | {'Time':<5}")
-    print("-" * 65)
+    print(f"{'Variant':<15} | {'D':<3} | {'Beta':<5} | {'Imp':<6} | {'Time':<5}")
+    print("-" * 55)
     for r in all_results:
         if 'error' not in r:
-            pred_err = r.get('prediction_error', 0.0)
-            print(f"{r['variant']:<15} | {r['density']:<3} | {r['beta']:<5} | {pred_err:<10.2f} | {r['improvement']:.4f} | {r['runtime']:.2f}s")
+            print(f"{r['variant']:<15} | {r['density']:<3} | {r['beta']:<5} | {r['improvement']:.4f} | {r['runtime']:.2f}s")
         else:
             print(f"{r['variant']:<15} | {r['density']:<3} | {r['beta']:<5} | ERROR")
 

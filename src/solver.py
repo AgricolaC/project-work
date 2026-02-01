@@ -1,10 +1,9 @@
 import logging
-from itertools import combinations
 import time
 import numpy as np
 import networkx as nx
 
-# Logging removed from step_generation but config kept for other potential uses
+# Logging config
 logging.basicConfig(level=logging.INFO, format='%(message)s')
 
 ISLAND_PRIORS = {
@@ -17,14 +16,14 @@ ISLAND_PRIORS = {
     
     # The "Bridge": Standard genetic mixing
     'Balanced': {
-        'mut_rate': (0.15, 0.30),      # Moderate mutation
+        'mut_rate': (0.12, 0.26),      # Moderate mutation
         'win_scale': (0.8, 1.2),       # Standard window (1.0)
         'mut_mix': [0.3, 0.4, 0.3]     # Balanced mix
     },
     
     # The "Scout": Absorbs the Chaos role. Fast, disruptive, low-precision.
     'Explore': {
-        'mut_rate': (0.40, 0.80),      # High mutation (approaching Chaos levels)
+        'mut_rate': (0.35, 0.80),      # High mutation (approaching Chaos levels)
         'win_scale': (0.3, 0.6),       # TINY window: Very fast, approximate evaluation
         'mut_mix': [0.1, 0.1, 0.8]     # 80% Scramble: Massive structural disruption
     }
@@ -33,6 +32,7 @@ ISLAND_PRIORS = {
 class Individual:
     """
     Represents a candidate solution in the population.
+    Genome is a PERMUTATION of real city IDs (1..N-1).
     """
     def __init__(self, genome, params, problem_context=None):
         self.genome = genome 
@@ -67,7 +67,6 @@ class Island:
             self.priors['mut_rate'] = (min(0.9, old_min * 1.5), min(0.95, old_max * 1.5))
         
     def initialize(self, seeds=None):
-        t0 = time.time()
         self.population = []
         # Inject Seeds if provided
         if seeds:
@@ -75,7 +74,7 @@ class Island:
                 if len(self.population) < self.pop_size:
                     self.population.append(Individual(list(seed_genome), self._sample_params()))
                 
-        # Internal Heuristics (only enabled if Seeding not disabled via ablation)
+        # Internal Heuristics
         heuristics_enabled = self.sim.ablation_config.get('seeding', True)
             
         if heuristics_enabled:
@@ -95,47 +94,52 @@ class Island:
 
         # Fill remainder with random individuals
         while len(self.population) < self.pop_size:
-            rng_genome = list(self.sim.virtual_cities)
+            rng_genome = list(self.sim.cities)
             self.sim.rng.shuffle(rng_genome)
             self.population.append(Individual(rng_genome, self._sample_params()))
         
         self.evaluate_population()
 
     def _generate_smart_genome(self, strategy):
-        v_nodes = list(self.sim.virtual_cities)
+        cities = list(self.sim.cities)
         
         if strategy == 'far_first':
-            return sorted(v_nodes, key=lambda v: self.sim.get_dist_to_base(v), reverse=True)
+            # Sort by distance from depot (descending)
+            return sorted(cities, key=lambda c: self.sim.dist_matrix[0, c], reverse=True)
             
         elif strategy == 'cheapest_first':
-            return sorted(v_nodes, key=lambda v: self.sim.node_golds[v])
+             # Sort by gold amount (ascending)
+            return sorted(cities, key=lambda c: self.sim.real_golds[c])
             
         elif strategy == 'nearest_neighbor':
-            # Greedy NN with candidate capping for speed
+            # Greedy NN with candidate capping
             genome = []
             curr = 0
-            unvisited = set(v_nodes)
+            unvisited = set(cities)
             while unvisited:
                 candidates = unvisited
                 if len(unvisited) > 200:
                     candidates = set(list(unvisited)[:200]) 
                 
-                nn = min(candidates, key=lambda v: self.sim.get_dist(curr, v))
+                # Find nearest to curr
+                nn = min(candidates, key=lambda c: self.sim.dist_matrix[curr, c])
                 genome.append(nn)
                 unvisited.remove(nn)
                 curr = nn
             return genome
             
         elif strategy == 'geometric':
-            # Use utility function
-            return sorted(v_nodes, key=lambda v: self._get_angle(v))
+            # Polar angle sort appropriate for VRP
+            return sorted(cities, key=lambda c: self._get_angle(c))
             
-        return v_nodes
+        return cities
 
-    def _get_angle(self, v_node):
-        real_id = self.sim.virtual_map[v_node]
-        pos = self.sim.cached_graph.nodes[real_id]['pos']
-        # Local angle calculation
+    def _get_angle(self, city_id):
+        # We need positions for geometric sort
+        # If graph has no positions, return 0
+        if not hasattr(self.sim, 'node_positions'):
+             return 0
+        pos = self.sim.node_positions[city_id]
         return np.arctan2(pos[1] - 0.5, pos[0] - 0.5)
 
     def evaluate_population(self):
@@ -169,6 +173,9 @@ class Island:
             if self.sim.rng.random() < child_params['mut_rate']:
                 child_genome = self._mutate_genome(child_genome, child_params['mut_mix'])
                 
+            if self.role == 'Exploit' and self.sim.ablation_config.get('local_search', True):
+                child_genome = self._local_search_2opt(child_genome)
+                
             child = Individual(child_genome, child_params, self.sim)
             new_pop.append(child)
             
@@ -176,18 +183,15 @@ class Island:
         self.evaluate_population()
 
         # Diversity Check: Island Catastrophe
-        # If the island has converged (all individuals are clones/similar)
-        # reset 90% of the population to random to force exploration.
         best_cost = self.population[0].cost
         median_cost = self.population[len(self.population)//2].cost
         
         if abs(median_cost - best_cost) < 1e-4: 
-            # Trigger Catastrophe
-            # Keep only the elite, kill the rest
+            # Trigger Catastrophe (keep elite, reset others)
             survivors = [self.population[0]]
             
             while len(survivors) < self.pop_size:
-                rng_genome = list(self.sim.virtual_cities)
+                rng_genome = list(self.sim.cities)
                 self.sim.rng.shuffle(rng_genome)
                 survivors.append(Individual(rng_genome, self._sample_params()))
                 
@@ -199,14 +203,14 @@ class Island:
         return min(candidates, key=lambda x: x.cost)
 
     def _crossover_genome(self, p1, p2):
+        # Ordered Crossover (OX1) or similar permutation-preserving operator
         size = len(p1)
+        # Random slice
         a, b = sorted(self.sim.rng.choice(range(size), 2, replace=False))
         child = [None] * size
         child[a:b+1] = p1[a:b+1]
         
-        # Optimization: Pre-calculate presence for O(1) lookups
         child_set = set(child[a:b+1])
-        
         curr = (b + 1) % size
         p2_idx = (b + 1) % size
         
@@ -265,9 +269,48 @@ class Island:
             genome[i:j+1] = sub
         return genome
 
+    def _local_search_2opt(self, genome):
+        """
+        Steepest Ascent 2-opt Local Search proxying 'Macro Distance'.
+        Optimizes the permutation based on pure distances between cities.
+        (Split DP handles the returns, so minimizing giant tour length is a good proxy).
+        """
+        size = len(genome)
+        improved = True
+        steps = 0
+        max_steps = 50 
+        
+        while improved and steps < max_steps:
+            improved = False
+            # Stochastic 2-opt
+            for _ in range(20): 
+                i, j = sorted(self.sim.rng.choice(range(size), 2, replace=False))
+                if j == i + 1: continue 
+                
+                # Nodes:
+                # prev -> u -> ... -> v -> next
+                # Reconnect: prev -> v -> ... -> u -> next
+                
+                u, v = genome[i], genome[j]
+                
+                # Predecessors/Successors in the tour check
+                prev = genome[i-1] if i > 0 else 0
+                next_ = genome[j+1] if j+1 < size else 0
+                
+                d_old = self.sim.dist_matrix[prev, u] + self.sim.dist_matrix[v, next_]
+                d_new = self.sim.dist_matrix[prev, v] + self.sim.dist_matrix[u, next_]
+                
+                if d_new < d_old - 1e-6:
+                    genome[i:j+1] = genome[i:j+1][::-1]
+                    improved = True
+                    steps += 1
+                    break
+        return genome
+
 class GA_Solver:
     """
-    Main orchestration class. Handles the Problem, Virtual Node creation, and manages the Islands.
+    Refactored solver using Giant Tour + Split DP.
+    NO CHUNKING. NO VIRTUAL NODES. STRICT ATOMIC PICKUP.
     """
     def __init__(self, problem, pop_size_per_island=30, max_generations=100, initial_individuals=None, ablation_config=None, seed=42):
         self.problem = problem
@@ -276,102 +319,59 @@ class GA_Solver:
         self.initial_individuals = initial_individuals or []
         self.rng = np.random.default_rng(seed)
         
-        # Ablation Config (Default: All Enabled)
+        # Ablation Config
         self.ablation_config = {
-            'granular': True,
-            'chunking': True,
-            'seeding': True
+            'seeding': True,
+            'local_search': True
         }
-        
-        # Threshold for usage of advanced physics (multi-hop approximation)
-        self.multi_hop_threshold = 1.0
         if ablation_config:
             self.ablation_config.update(ablation_config)
             
-        # Optimization: Cache graph to avoid expensive property copy in original problem.py
         self.cached_graph = problem.graph
 
-        # Estimate average edge length for cost approximation
-        # We can just sample edges if too many, but for N=2000 iterating all edges is fine.
-        # But wait, problem.graph might be dense.
-        # N=2000, max edges = 2 million. Iterating 2M edges is fast (fraction of second).
-        
-        edge_lengths = [d['dist'] for u, v, d in self.cached_graph.edges(data=True)]
-        if len(edge_lengths) > 0:
-            self.avg_edge_len = np.mean(edge_lengths)
-            # If the graph is sparse but connected via long edges, this might be large.
-            # But the granular expansion uses 'atomic' steps.
-            # If avg_edge_len is too large, our k will be small.
-            # Let's be conservative: use a smaller percentile or a fixed small value?
-            # Problem says "unit square coordinates".
-            # If we want to really approximate "atomic" cost, we should estimate
-            # how many "hops" are in a shortest path of length L.
-            # The hops are determined by the DENSITY of the graph.
-            # If density is high, we can jump directly (1 hop).
-            # But high beta penalizes 1 big jump.
-            # So the agent WANTS multiple small jumps.
-            # Are there intermediate nodes?
-            # If density=1.0, direct edge exists. But triangular inequality holds for dist.
-            # So dist(A,B) <= dist(A,C) + dist(C,B).
-            # But Cost(A,B) > Cost(A,C) + Cost(C,B) if beta > 1.
-            # So we WANT to find C.
-            # The graph contains "random" points.
-            # We can treat the field as a "sea" of points.
-            # The expected distance to nearest neighbor is ~ 1/sqrt(N).
-            # For N=1000, 1/31 ~= 0.03.
-            # So we can assume we can find hops of length ~0.05 easily.
-            self.avg_edge_len = max(0.05, float(np.percentile(edge_lengths, 10)))
-        else:
-             self.avg_edge_len = 0.1
-
-        # Optimization: Precompute distance matrix
+        # Precompute APSP (All-Pairs Shortest Path)
         n_nodes = self.cached_graph.number_of_nodes()
         self.dist_matrix = np.zeros((n_nodes, n_nodes), dtype=np.float32)
         
-        # Check density
+        # Check if we can use Euclidean optimization
         num_edges = problem.graph.number_of_edges()
         max_edges = n_nodes * (n_nodes - 1) // 2
-        is_dense = (num_edges == max_edges)
         
-        if is_dense and n_nodes > 200:
-            # Use direct Euclidean calculation for dense graphs (Triangle Inequality assumed)
-            # Fetch positions
-            pos = nx.get_node_attributes(problem.graph, 'pos')
-            coords = np.array([pos[i] for i in range(n_nodes)])
-            # Vectorized logical distance
+        # Positions for heuristics
+        self.node_positions = nx.get_node_attributes(problem.graph, 'pos')
+
+        if num_edges == max_edges and n_nodes > 100: # Dense/Complete
+            # Vectorized Euclidean
+            coords = np.array([self.node_positions[i] for i in range(n_nodes)])
             diff = coords[:, np.newaxis, :] - coords[np.newaxis, :, :]
             self.dist_matrix = np.sqrt(np.sum(diff**2, axis=-1))
         else:
-            # Use Dijkstra for sparse graphs
-            # Optimization: Use johnson if available or just all_pairs
-            # NetworkX all_pairs_dijkstra is decent but slow for python
+            # Sparse - Dijkstra
+            # nx.all_pairs_dijkstra_path_length is reliable
             raw_dists = dict(nx.all_pairs_dijkstra_path_length(problem.graph, weight='dist'))
             for u in range(n_nodes):
                 for v in range(n_nodes):
                     self.dist_matrix[u, v] = raw_dists[u].get(v, float('inf'))
 
-        self.real_golds = nx.get_node_attributes(problem.graph, 'gold')
+        # Cache Golds
+        golds_map = nx.get_node_attributes(problem.graph, 'gold')
+        # Ensure array access
+        self.real_golds = np.zeros(n_nodes, dtype=np.float32)
+        for i, g in golds_map.items():
+            self.real_golds[i] = g
 
-        self.virtual_cities = []
-        self.virtual_map = {} 
-        self.node_golds = {}
-        self.win_base = 20
+        # Define Cities (1..N-1)
+        self.cities = list(range(1, n_nodes))
+        self.win_base = 20 # Window for Split DP
         
-        # Analytic Setup
-        self._configure_virtual_nodes_analytic()
-        
-        # Robust Seeding: Ensure seeds match virtual nodes
-        self._sanitize_seeds()
-        
+        # Configure Islands
         self.islands = []
         for i, role in enumerate(['Exploit', 'Balanced', 'Explore']):
             isl = Island(role, role, self.pop_size, self)
             
-            # Seeding Logic: pass external seeds only if enabled and role is right
             seeds = None
-            if self.ablation_config['seeding']:
-                if i == 0: # Only seed Exploit island
-                    seeds = self.initial_individuals
+            if self.ablation_config['seeding'] and i == 0: 
+                seeds = self.initial_individuals
             
             isl.initialize(seeds=seeds)
             self.islands.append(isl)
@@ -379,251 +379,97 @@ class GA_Solver:
         self.global_best = self.islands[0].population[0]
         self.generation_count = 0
 
-    def _configure_virtual_nodes_analytic(self):
-        """
-        Robust Virtual Node Generation.
-        Uses logarithmic scaling for stability and importance-based capping to prevent bloat.
-        """
-        self.virtual_cities = []
-        self.virtual_map = {} 
-        self.node_golds = {}
-        
-        n_cities = self.problem.graph.number_of_nodes()
-        beta = self.problem.beta
-        alpha = self.problem.alpha
-
-        # 1. Phase Transition Guard
-        # Updated Logic: Disable below Beta=1.25 unless forcibly enabled by ablation
-        chunking_enabled = self.ablation_config.get('chunking', True)
-        
-        if beta <= self.multi_hop_threshold or not chunking_enabled:
-            vid_counter = 1
-            for c in range(1, n_cities):
-                self.virtual_cities.append(vid_counter)
-                self.virtual_map[vid_counter] = c
-                self.node_golds[vid_counter] = self.real_golds[c]
-                vid_counter += 1
-            
-            self.win_base = 20
-            # logging.info(f"Chunking Disabled (Beta={beta}, Config={chunking_enabled})")
-            return
-
-        # 2. Analytic Split Calculation
-        requested_splits = [] 
-        
-        for c in range(1, n_cities):
-            weight = self.real_golds[c]
-            dist = self.dist_matrix[0, c]
-            
-            if dist < 1e-6: 
-                k = 1
-                imp = 0
-            else:
-                # Rigorous Calculus-Based Formula
-                # C(k) = k*D + k*(alpha*D*g/k)^beta
-                # Optimal k = (beta-1)^(1/beta) * alpha * g * D^(1 - 1/beta)
-                if beta > 1.001:
-                    term1 = (beta - 1.0) ** (1.0 / beta)
-                    term2 = alpha * weight
-                    term3 = dist ** (1.0 - 1.0 / beta)
-                    # DAMPENING FACTOR: Scale optimal k by 0.5 to trade theoretical optimality for GA convergence speed.
-                    raw_k = 0.5 * term1 * term2 * term3
-                else:
-                    raw_k = 1.0
-                
-                k = int(np.floor(raw_k))
-                
-                # Priority Score (Cost Reduction Potential)
-                # How much do we save by chunking? Approx ~ (alpha*D*G)^beta
-                imp = (alpha * weight * dist) ** beta
-            
-            # Reduce per-city cap from 50 to 40
-            k = max(1, min(k, 40))
-            requested_splits.append({'c': c, 'k': k, 'imp': imp})
-
-        # 3. Global Safety Cap (Reduced to 400 for Runtime Performance)
-        # We use a soft cap that scales down proportional to importance if we exceed budget.
-        MAX_TOTAL_NODES = 500
-        current_total = sum(x['k'] for x in requested_splits)
-        
-        if current_total > MAX_TOTAL_NODES:
-            # If we exploded the budget (likely with high alpha), 
-            # we scale down k proportional to the overshoot, rather than just filling from top.
-            # This preserves the *relative* distribution of k_opt.
-            scale_factor = MAX_TOTAL_NODES / current_total
-            for item in requested_splits:
-                if item['k'] > 1:
-                    item['k'] = max(1, int(item['k'] * scale_factor))
-            
-        # 4. Generation
-        requested_splits.sort(key=lambda x: x['c'])
-        vid_counter = 1
-        for item in requested_splits:
-            c = item['c']
-            k = item['k']
-            weight = self.real_golds[c]
-            gold_per_chunk = weight / k
-            
-            for _ in range(k):
-                self.virtual_cities.append(vid_counter)
-                self.virtual_map[vid_counter] = c
-                self.node_golds[vid_counter] = gold_per_chunk
-                vid_counter += 1
-        
-        avg_k = len(self.virtual_cities) / max(1, n_cities)
-        self.win_base = int(30 / np.sqrt(avg_k))
-        self.win_base = max(5, self.win_base)
-        
-        factor = len(self.virtual_cities) / max(1, n_cities - 1)
-        logging.info(f"CHUNKING FINALIZED: {len(self.virtual_cities)} virtual nodes created (Expansion: {factor:.2f}x). Beta={beta}")
-
-    def _sanitize_seeds(self):
-        """
-        Ensure initial_individuals match the current set of virtual_cities.
-        If chunking is active, expand real-node seeds into virtual-node sequences.
-        """
-        if not self.initial_individuals:
-            return
-            
-        # Build Reverse Map: Real -> [Virtuals]
-        real_to_virtual = {}
-        for v_id, r_id in self.virtual_map.items():
-            if r_id not in real_to_virtual:
-                real_to_virtual[r_id] = []
-            real_to_virtual[r_id].append(v_id)
-            
-        for r_id in real_to_virtual:
-            real_to_virtual[r_id].sort()
-            
-        new_seeds = []
-        for seed in self.initial_individuals:
-            new_genome = []
-            for node in seed:
-                if node in self.virtual_map:
-                    new_genome.append(node)
-                elif node in real_to_virtual:
-                    new_genome.extend(real_to_virtual[node])
-                else:
-                    if node == 0: continue
-            
-            if len(new_genome) == len(self.virtual_cities):
-                new_seeds.append(new_genome)
-                
-        self.initial_individuals = new_seeds
-
     def get_dist(self, u, v):
-        u_real = 0 if u == 0 else self.virtual_map[u]
-        v_real = 0 if v == 0 else self.virtual_map[v]
-        return self.dist_matrix[u_real, v_real]
-    
-    def get_dist_to_base(self, u_virt):
-        return self.get_dist(0, u_virt)
+        return self.dist_matrix[u, v]
 
     def split_route(self, permutation, win_scale):
         """
-        Optimal Split Algorithm with Hybrid Physics.
+        Optimal Split DP for VRP.
+        Decides where to insert returns to depot (0).
+        
+        Physics:
+        - Atomic pickup: Load increases by gold[v] upon leaving v.
+        - Macro-leg cost: cost(u, v, w) = d + (alpha * d * w)^beta
         """
         n = len(permutation)
         win = int(self.win_base * win_scale)
         win = max(5, win)
         
-        # Physics Flags
-        # The Solver now always uses the correct Granular Physics + Chunking.
-        # "Optmistic" linear calculation (which caused Hallucination) is permanently removed.
+        # V[i] = min cost to service first i cities in permutation
+        # P[j] = start index of the trip that ENDS at j
+        # Indices in V correspond to number of cities serviced.
+        # V[0] = 0 (0 cities serviced)
+        # V[n] = total cost
         
         V = [float('inf')] * (n + 1)
         V[0] = 0.0
-        P = [-1] * (n + 1)
+        P = [-1] * (n + 1) 
         
+        # Optimization: Localize access
+        d_mat = self.dist_matrix
+        golds = self.real_golds
+        depot = 0
+        
+        alpha = self.problem.alpha
+        beta = self.problem.beta
+        
+        def cost_fn(dist, w):
+            # Optimized cost calculation
+            if alpha == 0: return dist
+            return dist + (alpha * dist * w) ** beta
+
         for i in range(n):
             if V[i] == float('inf'): continue
             
-            # --- CORE LOGIC ---
-            # We must carefully track:
-            # 1. `path_cost`: The cost of moving 0 -> ... -> prev (Forward Only)
-            # 2. `final_leg`: The cost of moving prev -> 0 (Return)
-            # 3. `total_trip_cost`: path_cost + final_leg
+            # Start a new trip from depot to permutation[i]
+            # Trip serves cities permutation[i] ... permutation[j-1]
             
-            # Step 1: Initial Link (0 -> u)
+            # Leg 1: Depot -> permutation[i]
             u = permutation[i]
-            d0 = self.get_dist(0, u)
+            d_out = d_mat[depot, u]
+            current_trip_cost = cost_fn(d_out, 0)
             
-            # Initial Path Cost (0 -> u) is always Empty (Linear)
-            path_cost = d0
-            
-            # Initial Return (u -> 0)
-            dr = self.get_dist(u, 0)
-            current_gold = self.node_golds[u]
-            
-            # --- START FIXED COST LOGIC ---
-            # Multi-Hop Approximation for Beta > 1
-            # If we just do (alpha*dr*g)**beta, it's huge.
-            # Actual path will use k small hops.
-            # Cost approx = k * (dr/k + (alpha * dr/k * g)**beta )
-            #             = dr + k * (alpha * dr/k * g)**beta
-            #             = dr + k^(1-beta) * (alpha * dr * g)**beta
-            
-            if self.problem.beta > self.multi_hop_threshold:
-                k_approx = max(1.0, dr / self.avg_edge_len)
-                penalty_factor = k_approx ** (1.0 - self.problem.beta)
-                ret_cost = dr + penalty_factor * ((self.problem.alpha * dr * current_gold) ** self.problem.beta)
-            else:
-                ret_cost = dr + (self.problem.alpha * dr * current_gold) ** self.problem.beta
-            # --- END FIXED COST LOGIC ---
-
-            # Update Bellman for Single Trip
-            trip_total = path_cost + ret_cost
-            if V[i] + trip_total < V[i+1]:
-                V[i+1] = V[i] + trip_total
-                P[i+1] = i
-            
-            # Step 2: Chain Extension (u -> v -> ...)
-            limit = min(i + win + 1, n + 1)
+            current_load = golds[u]
             prev = u
             
-            for j in range(i + 2, limit):
-                new_city = permutation[j-1]
-                d_seg = self.get_dist(prev, new_city)
+            # Try extending the trip up to window limit
+            limit = min(i + win + 1, n)
+            
+            for j in range(i + 1, limit + 1):
+                # Currently at 'prev' (which is permutation[j-2] roughly, or u if j=i+1)
+                # Trip ends at permutation[j-1].
                 
-                # Segment Cost (prev -> new_city)
-                # Carries `current_gold` (load from prev)
+                # Option 1: CLOSE TRIP here. (prev -> depot)
+                d_in = d_mat[prev, depot]
+                return_cost = cost_fn(d_in, current_load)
                 
-                if self.problem.beta > self.multi_hop_threshold:
-                    k_approx = max(1.0, d_seg / self.avg_edge_len)
-                    penalty_factor = k_approx ** (1.0 - self.problem.beta)
-                    seg_cost = d_seg + penalty_factor * ((self.problem.alpha * d_seg * current_gold) ** self.problem.beta)
-                else:
-                    seg_cost = d_seg + (self.problem.alpha * d_seg * current_gold) ** self.problem.beta
+                total = V[i] + current_trip_cost + return_cost
                 
-                # Accumulate Forward Path
-                path_cost += seg_cost
-                
-                # Prepare for next
-                current_gold += self.node_golds[new_city]
-                prev = new_city
-                
-                # Calculate New Return (new_city -> 0)
-                dr = self.get_dist(new_city, 0)
-                
-                if self.problem.beta > self.multi_hop_threshold:
-                    k_approx = max(1.0, dr / self.avg_edge_len)
-                    penalty_factor = k_approx ** (1.0 - self.problem.beta)
-                    ret_cost = dr + penalty_factor * ((self.problem.alpha * dr * current_gold) ** self.problem.beta)
-                else:
-                    ret_cost = dr + (self.problem.alpha * dr * current_gold) ** self.problem.beta
-                
-                # Update Bellman for Extended Trip
-                trip_total = path_cost + ret_cost
-                if V[i] + trip_total < V[j]:
-                    V[j] = V[i] + trip_total
+                if total < V[j]:
+                    V[j] = total
                     P[j] = i
+                    
+                # Option 2: EXTEND TRIP to next city (if available)
+                # Next city is permutation[j] (shifted because j is 1-based index limit)
+                # Wait, j is the index in V. V[j] means j cities served.
+                # So next city to add is permutation[j].
+                
+                if j < n and j < limit:
+                    next_city = permutation[j]
+                    d_inter = d_mat[prev, next_city]
+                    
+                    step_cost = cost_fn(d_inter, current_load)
+                    current_trip_cost += step_cost
+                    current_load += golds[next_city]
+                    prev = next_city
         
+        # Reconstruct Trips
         trips = []
         curr = n
         while curr > 0:
             start = P[curr]
             sub_route = permutation[start:curr]
-            trips.append(sub_route)
+            trips.append(list(sub_route)) 
             curr = start
         trips.reverse()
         
