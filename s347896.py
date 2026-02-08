@@ -1,117 +1,45 @@
-from problem import Problem
-from src.solver import GA_Solver
-from src.utils import reconstruct_route_for_plotting
+import networkx as nx
 import numpy as np
+from src.core.solver import GA_Solver
+from src.core.utils import encode_solution_visits
 
-def solution(p: Problem):
+def solution(problem):
     """
-    Solves VRP using Giant Tour + Split DP.
-    """    
-    # Simple, defensible configuration based on N
-    N = p.graph.number_of_nodes()
+    Solver entry point.
     
-    # Scale effort with problem size
-    # 200 cities -> ~2-3k evals? 
-    # 500 cities -> ~5k evals?
-    # User asked for "up to 20000" in total_evals logic before, let's keep it reasonable.
-    
-    base_evals = 5000
-    if N > 200:
-        base_evals = 10000
-    if N > 1000:
-        base_evals = 15000
+    Args:
+        problem (Problem): Instance containing graph, alpha, beta, etc. 
         
-    pop_size = 60
-    generations = base_evals // pop_size
+    Returns:
+        list of tuples: [(city_id, gold_collected), ...] 
+        Starts and ends with (0,0).
+    """
+    # 0. Determine Budget
+    n_nodes = problem.graph.number_of_nodes()
+    budget = GA_Solver.get_budget(n_nodes)
     
-    print(f"Running GA Solver: N={N}, Pop={pop_size}, Gens={generations}")
+    # 1. Initialize Solver
+    # Use defaults from GA_Solver which now uses get_budget internally for pop/gens
+    solver = GA_Solver(problem)
     
-    # Initial seeds
-    seeds = []
-    # 1. Identity
-    seeds.append(list(range(1, N)))
-    
-    sim = GA_Solver(p, pop_size_per_island=pop_size // 3, max_generations=generations, initial_individuals=seeds)
-    
-    for _ in range(generations):
-        sim.step_generation()
+    # 2. Run GA
+    for _ in range(solver.max_generations):
+        solver.step_generation()
         
-    best_ind = sim.global_best
-    best_cost, best_trips = best_ind.cost, best_ind.trips
+    # 3. Refine Best Solution
+    #    Use Robust Large Neighborhood Search (LNS)
+    best_ind = solver.global_best
+    refined_ind = solver.improve_with_lns(best_ind.clone(), 
+                                          iters=budget['lns_iters'], 
+                                          destroy_frac=(0.15, 0.35))
     
-    # Format output for the system
-    # Needs to be a list of (node, gold_collected)
-    # The system expects the full sequence including intermediate nodes if we want to show them?
-    # Or just the visit sequence? 
-    # The problem.evaluate check likely iterates the list and checks adjacency.
-    # If adjacency check is strict (must be edges), we MUST expand shortest paths.
+    # 4. Final Exact Split (Evaluation)
+    #    Ensure output matches exactly optimal split for this permutation
+    final_cost, final_trips = solver.split_route(refined_ind.genome, win_scale=None)
     
-    # Reconstruct visualization route (node sequence)
-    full_route_nodes = reconstruct_route_for_plotting(p, best_trips)
+    # 5. Format Output
+    #    Use canonical expansion to ensure edge validity and correct gold semantics
+    #    flattened [(node, gold), ...] including pass-throughs
+    formatted_solution = solver.expand_solution_to_action_list(final_trips)
     
-    # Construct the final expected format: vector of (node_id, gold_collected)
-    # Note: "gold_collected" is only non-zero at the specific city visit.
-    # Intermediate nodes have 0 gold.
-    
-    formatted_solution = []
-    
-    golds = p.graph.nodes(data='gold', default=0)
-    
-    # We must be careful: reconstruct_route_for_plotting expands trips.
-    # A trip 0 -> A -> B -> 0 becomes 0..n..A..n..B..n..0
-    # Gold is collected ONLY at A and B.
-    # But reconstruct_route_for_plotting just returns IDs. It loses the "target" info.
-    # However, gold is fixed per node.
-    # BUT: If we pass through C to get to B, we don't pick up C's gold if C was not in the tour?
-    # Actually, the problem says "gold[i] > 0 collected when visited".
-    # If we visit C as an intermediate node, we technically visit it.
-    # BUT the Giant Tour optimizes a permutation.
-    # If the shortest path 0->B goes through A, do we pick up A?
-    # If A is elsewhere in the tour, we pick it up then.
-    # If we pick it up now, we violate "exactly once".
-    # Standard VRP on general graphs assumption: Intermediate nodes are "transit". You only "service" the node (collect gold) if it's the target.
-    # The 'formatted_solution' format usually implies (node, transaction).
-    # If we just output (intermediate, 0), it's fine.
-    # Only output (target, gold) when we intend to service it.
-    
-    # Refined Construction:
-    # Iterate trips again.
-    
-    formatted_solution = [(0, 0)]
-    current_node = 0
-    
-    for trip in best_trips:
-        for target in trip:
-            if target == current_node: continue
-            
-            # Move current -> target
-            try:
-                path = nx.shortest_path(p.graph, current_node, target, weight='dist')
-                # Path includes [start, ..., end]
-                # We emit intermediates with 0 gold
-                for node in path[1:-1]:
-                    formatted_solution.append((node, 0))
-                
-                # Emit target with its gold
-                amount = golds[target]
-                formatted_solution.append((target, amount))
-                current_node = target
-                
-            except:
-                # Disconnected? Jump.
-                amount = golds[target]
-                formatted_solution.append((target, amount))
-                current_node = target
-                
-        # Return to depot
-        if current_node != 0:
-            try:
-                path = nx.shortest_path(p.graph, current_node, 0, weight='dist')
-                for node in path[1:]:
-                    formatted_solution.append((node, 0))
-                current_node = 0
-            except:
-                formatted_solution.append((0, 0))
-                current_node = 0
-
     return formatted_solution
