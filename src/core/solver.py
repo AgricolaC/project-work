@@ -89,8 +89,6 @@ class Island:
             if seeding_mode == 'minimal':
                 # Minimal: Just NN, Cheapest Insertion, Random
                 heuristics = ['nearest_neighbor', 'cheapest_insertion', 'gold_aware_greedy']
-                # Override roles? Or just apply to current role?
-                # If 'minimal', we likely ignore role-specific advanced ones.
             else:
                 # Full mode (Role specific)
                 heuristics = {
@@ -102,7 +100,8 @@ class Island:
         else:
             heuristics = []
 
-        num_smart = max(1, int(self.pop_size * 0.2 / max(1, len(heuristics)))) if heuristics else 0
+        # Limit seeds to 1 per heuristic to avoid overwhelming the diversity
+        num_smart = 1 if heuristics else 0
         
         for h_name in heuristics:
             for _ in range(num_smart):
@@ -135,6 +134,10 @@ class Island:
         elif strategy == 'cheapest_first':
              # Sort by gold amount (ascending)
             return sorted(cities, key=lambda c: self.sim.real_golds[c])
+
+        elif strategy == 'heavy_first':
+             # Sort by gold amount (descending)
+            return sorted(cities, key=lambda c: self.sim.real_golds[c], reverse=True)
             
         elif strategy == 'nearest_neighbor':
             # Greedy NN with candidate capping
