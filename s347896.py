@@ -29,9 +29,15 @@ def solution(problem):
     # 3. Refine Best Solution
     #    Use Robust Large Neighborhood Search (LNS)
     best_ind = solver.global_best
+    
+    # Dynamic Destroy Fraction for Large N
+    destroy_frac = (0.15, 0.35)
+    if n_nodes > 500:
+        destroy_frac = (0.05, 0.15)
+        
     refined_ind = solver.improve_with_lns(best_ind.clone(), 
                                           iters=budget['lns_iters'], 
-                                          destroy_frac=(0.15, 0.35))
+                                          destroy_frac=destroy_frac)
     
     # 4. Final Exact Split (Evaluation)
     #    Ensure output matches exactly optimal split for this permutation
@@ -43,3 +49,10 @@ def solution(problem):
     formatted_solution = solver.expand_solution_to_action_list(final_trips)
     
     return formatted_solution
+
+def is_valid(problem, path):
+    """
+    Validates whether the solution path consists of valid edges in the problem graph.
+    """
+    for (c1, gold1), (c2, gold2) in zip(path, path[1:]):
+        yield problem.graph.has_edge(c1,c2)

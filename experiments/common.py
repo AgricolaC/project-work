@@ -91,7 +91,32 @@ def run_solver_pipeline(problem, solver_class, solver_config=None, lns_config=No
             budget = solver_class.get_budget(problem.graph.number_of_nodes())
             iters = budget['lns_iters']
             
-        current_ind = solver.improve_with_lns(current_ind, iters=iters, destroy_frac=(0.15, 0.35))
+        # Collect candidates: Top 2 from each island
+        candidates = []
+        if hasattr(solver, 'islands'):
+            for isl in solver.islands:
+                isl.sort_pop() # Ensure sorted
+                candidates.extend([ind.clone() for ind in isl.population[:2]])
+        else:
+            candidates.append(current_ind.clone())
+            
+        # Deduplicate
+        unique_candidates = []
+        seen = set()
+        for c in candidates:
+            if c.cost not in seen:
+                unique_candidates.append(c)
+                seen.add(c.cost)
+        
+        # Run LNS on all unique top candidates
+        best_lns_ind = current_ind # Fallback
+        
+        for cand in unique_candidates:
+            refined = solver.improve_with_lns(cand, iters=iters, destroy_frac=(0.15, 0.35))
+            if refined.cost < best_lns_ind.cost:
+                best_lns_ind = refined
+                
+        current_ind = best_lns_ind
         
     # 4. Exact Split (Evaluation)
     # Re-split to be sure we have the trips corresponding to best genome

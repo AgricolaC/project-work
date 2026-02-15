@@ -334,7 +334,7 @@ class Island:
                 child_genome = self._mutate_genome(child_genome, child_params['mut_mix'])
                 
             if self.role == 'Exploit' and self.sim.ablation_config.get('local_search', True):
-                child_genome = self._local_search_2opt(child_genome)
+                child_genome = self.local_search(child_genome)
                 
             child = Individual(child_genome, child_params, self.sim)
             new_pop.append(child)
@@ -433,43 +433,51 @@ class Island:
             genome[i:j+1] = sub
         return genome
 
-    def _local_search_2opt(self, genome):
+    def local_search(self, genome):
         """
-        Steepest Ascent 2-opt Local Search proxying 'Macro Distance'.
-        Optimizes the permutation based on pure distances between cities.
-        (Split DP handles the returns, so minimizing giant tour length is a good proxy).
+        True Cost Local Search using Split DP.
+        Runs a few stochastic moves and accepts ONLY if splitting yields cheaper total cost.
+        Includes: Swap, Relocate, 2-Opt.
+        Budget: 40 attempts.
         """
-        size = len(genome)
-        improved = True
-        steps = 0
-        max_steps = 50 
+        current_genome = list(genome)
+        current_cost, _ = self.sim.split_route(current_genome, win_scale=None)
         
-        while improved and steps < max_steps:
-            improved = False
-            # Stochastic 2-opt
-            for _ in range(20): 
-                i, j = sorted(self.sim.rng.choice(range(size), 2, replace=False))
-                if j == i + 1: continue 
+        n = len(current_genome)
+        max_attempts = 15 # Reduced from 40 for speed
+        
+        for _ in range(max_attempts):
+            op = self.sim.rng.choice(['relocate', 'swap', '2opt'])
+            
+            # Create Candidate
+            candidate = list(current_genome)
+            
+            if op == 'relocate':
+                # Move i to j
+                i = self.sim.rng.integers(0, n)
+                j = self.sim.rng.integers(0, n)
+                if i == j: continue
+                val = candidate.pop(i)
+                candidate.insert(j, val)
                 
-                # Nodes:
-                # prev -> u -> ... -> v -> next
-                # Reconnect: prev -> v -> ... -> u -> next
+            elif op == 'swap':
+                # Swap i and j
+                i, j = self.sim.rng.choice(range(n), 2, replace=False)
+                candidate[i], candidate[j] = candidate[j], candidate[i]
                 
-                u, v = genome[i], genome[j]
+            elif op == '2opt':
+                # Reverse segment i..j
+                i, j = sorted(self.sim.rng.choice(range(n), 2, replace=False))
+                candidate[i:j+1] = candidate[i:j+1][::-1]
+            
+            # Evaluate using Exact Split
+            new_cost, _ = self.sim.split_route(candidate, win_scale=None)
+            
+            if new_cost < current_cost - 1e-6:
+                current_genome = candidate
+                current_cost = new_cost
                 
-                # Predecessors/Successors in the tour check
-                prev = genome[i-1] if i > 0 else 0
-                next_ = genome[j+1] if j+1 < size else 0
-                
-                d_old = self.sim.dist_matrix[prev, u] + self.sim.dist_matrix[v, next_]
-                d_new = self.sim.dist_matrix[prev, v] + self.sim.dist_matrix[u, next_]
-                
-                if d_new < d_old - 1e-6:
-                    genome[i:j+1] = genome[i:j+1][::-1]
-                    improved = True
-                    steps += 1
-                    break
-        return genome
+        return current_genome
 
 class GA_Solver:
     """
@@ -525,7 +533,7 @@ class GA_Solver:
         self.ablation_config = {
             'seeding': True,  # Main toggle
             'seeding_mode': 'full', # 'full' or 'minimal'
-            'local_search': True,
+            'local_search': False,
             'island_mode': '3-island', # '3-island' or 'single'
             'adaptive_mutation': True # True or False
         }
@@ -745,7 +753,7 @@ class GA_Solver:
                     
                     # Safety counter to prevent infinite loops (N nodes max depth)
                     steps = 0
-                    max_steps = len(self.problem.graph.nodes) + 1
+                    max_steps = len(self.cached_graph.nodes) + 1
                     
                     while temp_trace != curr_node and steps < max_steps:
                         temp_stack.append(temp_trace)
@@ -763,7 +771,7 @@ class GA_Solver:
                         # Fallback to NetworkX shortest path
                         try:
                             # Returns [curr, v1, v2, ... target]
-                            nx_path = nx.shortest_path(self.problem.graph, source=curr_node, target=target, weight='dist')
+                            nx_path = nx.shortest_path(self.cached_graph, source=curr_node, target=target, weight='dist')
                             # Stack needs [target, ..., v2, v1] (popped LIFO)
                             path_stack = nx_path[1:][::-1]
                         except Exception:
@@ -1012,8 +1020,8 @@ class GA_Solver:
             
             # Explicit Edge Distance from Graph
             # Robust to macro/L difference if any
-            if self.problem.graph.has_edge(u_node, v_node):
-                dist = self.problem.graph[u_node][v_node].get('dist', 1.0)
+            if self.cached_graph.has_edge(u_node, v_node):
+                dist = self.cached_graph[u_node][v_node].get('dist', 1.0)
             else:
                 # Fallback to L if edge missing (e.g. implicitly fully connected)
                 dist = self.L[u_node, v_node]
