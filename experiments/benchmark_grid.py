@@ -47,7 +47,7 @@ def run_benchmark(alphas, betas, densities, seeds, ns, output_dir, pop_size=None
                         solver_config = {
                             'pop_size_per_island': pop_size,
                             'max_generations': generations,
-                            'ablation_config': {'seeding': True, 'local_search': True},
+                            'ablation_config': {'seeding': True, 'local_search': False},
                             'seed': seed
                         }
 

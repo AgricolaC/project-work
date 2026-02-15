@@ -47,7 +47,6 @@ def solution(problem):
     #    Use canonical expansion to ensure edge validity and correct gold semantics
     #    flattened [(node, gold), ...] including pass-throughs
     formatted_solution = solver.expand_solution_to_action_list(final_trips)
-    
     return formatted_solution
 
 def is_valid(problem, path):
