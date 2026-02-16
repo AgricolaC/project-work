@@ -1,7 +1,7 @@
 import networkx as nx
 import numpy as np
 from src.core.solver import GA_Solver
-from src.core.utils import encode_solution_visits
+
 
 def solution(problem):
     """

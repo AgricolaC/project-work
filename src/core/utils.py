@@ -1,25 +1,3 @@
-def encode_solution_visits(trips, golds_by_node):
-    """
-    Flattens a list of trips into the decision-visit format [(node, gold), ...].
-    
-    Args:
-        trips (list of lists): e.g., [[1, 2], [3, 4]]
-        golds_by_node (dict): Map of city ID -> gold amount
-        
-    Returns:
-        list of tuples: [(0,0), (1, g1), (2, g2), (0,0), (3, g3), (4, g4), (0,0)]
-    """
-    solution = [(0, 0)]
-    
-    for trip in trips:
-        for city in trip:
-            g = golds_by_node.get(city, 0)
-            solution.append((city, g))
-        # Return to depot after each trip
-        solution.append((0, 0))
-        
-    return solution
-
 def validate_encoded_solution(solution, n_nodes, expected_total_gold, golds_by_node=None):
     """
     Validates constraints:
