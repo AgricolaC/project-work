@@ -71,7 +71,6 @@ class Island:
             # Reduce Scramble in Convex Penalty regimes (structure matters more than chaos)
             # Bias toward Inversion/Swap which preserve more structure
             self.priors['mut_mix'] = [0.2, 0.5, 0.3] # Swap, Inv, Scramble
-            # Keep mutation rate moderate
 
     def initialize(self, seeds=None):
         self.population = []
@@ -597,9 +596,6 @@ class GA_Solver:
         self.islands = []
         
         if self.ablation_config['island_mode'] == 'single':
-            # Single Island Mode: Use 'Balanced' strategy, triple population to match budget?
-            # Or just use standard population? Usually ablation means removing components.
-            # But specific "Single vs 3-island" implies structural comparison.
             # To keep evaluation budget (evals/gen) consistent, we trip population.
             # 3 islands of N -> 1 island of 3N
             single_pop = self.pop_size * 3
@@ -729,7 +725,6 @@ class GA_Solver:
         for trip in trips:
             # Trip is a sequence of target pickups: [t1, t2, ...]
             # We go curr -> t1 -> t2 ... -> last -> 0
-            
             full_sequence = trip + [0] # Must return to depot 0 at end
             
             for target in full_sequence:
@@ -737,10 +732,8 @@ class GA_Solver:
                 # Using self.parent[curr_node, target] is NOT sufficient directly because 
                 # parent matrix stores 'predecessor of v in path FROM source'.
                 # So we need to trace BACK from target to curr_node using self.parent[curr_node, ...]
-                
                 path_stack = []
                 trace = target
-                
                 # Verify reachability
                 if self.L[curr_node, target] == float('inf'):
                     # Should not happen in connected components, but fail safe
@@ -749,8 +742,7 @@ class GA_Solver:
                     # Attempt parent tracing
                     temp_trace = trace
                     temp_stack = []
-                    valid_trace = True
-                    
+                    valid_trace = True    
                     # Safety counter to prevent infinite loops (N nodes max depth)
                     steps = 0
                     max_steps = len(self.cached_graph.nodes) + 1
@@ -777,7 +769,6 @@ class GA_Solver:
                         except Exception:
                             # Last resort: direct jump (should imply edge exists or penalty will be huge later)
                             path_stack = [target]
-
                 # Pops trace path: (v1, v2, ..., target)
                 while path_stack:
                     node = path_stack.pop()
@@ -785,15 +776,6 @@ class GA_Solver:
                     taken_gold = 0
                     # If this node is the 'target' (planned pickup), take its gold
                     if node == target and node != 0: 
-                        # Check if it really is part of our planned pickup list for this trip
-                        # Actually 'target' variable is exactly the next planned stop.
-                        # However, we only take gold if it IS the target we aimed for?
-                        # Yes, intermediate visits to other cities don't trigger pickup unless planned?
-                        # Spec says: "Output is 'gold taken from that city at that visit'".
-                        # Since VRP usually implies we pickup at 'target'. 
-                        # What if we pass through a city that is LATER in the trip?
-                        # The professor's rule: "explicitly include intermediate nodes ... gold=0".
-                        # ONLY the intended target gets gold taken now.
                         taken_gold = self.real_golds[node]
                         
                     if node == 0:
@@ -1080,12 +1062,6 @@ class GA_Solver:
         bucket_g = bucket(rho_g)
         bucket_s = bucket(rho_s) if rho_s is not None else None
         
-        # Feedback Logic: Prefer solution bucket if available, 
-        # especially if significantly different? 
-        # User says: "prefer rho_solution bucket if it differs from global by >= 1 bucket"
-        # Since we use thresholds, if it's different, it IS different by at least a category.
-        # So we simply prefer solution if available.
-        
         final_bucket = bucket_s if bucket_s else bucket_g
         
         return {
@@ -1185,7 +1161,7 @@ class GA_Solver:
                 current_regime = self.describe_regime(individual.trips)
                 rho_bucket = current_regime['rho_solution_bucket'] or current_regime['rho_global_bucket']
             
-            # --- 1. Identify High-Impact Cities ---
+            # Identify High-Impact Cities
             # Score = (L_prev_u + L_u_next) * (1 + gold_u / mean_gold)
             contributions = []
             for i in range(n):
@@ -1206,7 +1182,7 @@ class GA_Solver:
             candidates = [x[1] for x in contributions[:limit]]
             self.rng.shuffle(candidates)
             
-            # --- 2. Targeted Relocate & Swap ---
+            # Targeted Relocate & Swap
             for idx_src in candidates:
                 if total_steps >= max_steps: break
                 u = genome[idx_src]
@@ -1261,10 +1237,9 @@ class GA_Solver:
 
             if improved_any: continue
 
-            # --- 3. Heavy-Late Relocation (Regime Gated) ---
+            # Heavy-Late Relocation (Regime Gated
             # Condition: Concave OR (Convex but Distance-Dominated) OR (Significant Bundling Present)
             # If strictly convex and penalty-dominated with singleton trips, this operator is harmful/useless.
-            
             should_run_heavy = False
             if self.problem.beta <= 1:
                 should_run_heavy = True
@@ -1273,9 +1248,7 @@ class GA_Solver:
                  # Run if distance dominated (penalty low) OR if we have multi-city trips (bundling active)
                  # Note: individual.trips is kept up to date by splits
                  multi_frac = sum(1 for t in individual.trips if len(t)>1) / len(individual.trips) if individual.trips else 0
-                 
-                 # If we don't have rho_bucket from earlier (rare), Recalc?
-                 # It should be defined
+
                  if 'rho_bucket' not in locals():
                       rho_bucket = getattr(self, 'regime', {}).get('rho_global_bucket', 'mixed')
                       
@@ -1310,7 +1283,7 @@ class GA_Solver:
             
             if improved_any: continue
 
-            # --- 3b. Penalty-Aware De-bundle (for rho=penalty, beta>=1) ---
+            # Penalty-Aware De-bundle (for rho=penalty, beta>=1
             # Target: break costly internal legs by relocating cities to early positions
             if rho_bucket == 'penalty' and self.problem.beta >= 1 and pass_idx % 2 == 1:
                 # Find worst internal legs by penalty contribution
@@ -1393,8 +1366,6 @@ class GA_Solver:
                     best_cost_increase = float('inf')
                     
                     # Baseline cost of partial solution
-                    # We can optimize by only calc diff, but safety first:
-                    
                     for k in range(len(temp_genome) + 1):
                         curr_cand = list(temp_genome)
                         curr_cand.insert(k, city)
@@ -1563,7 +1534,7 @@ class GA_Solver:
             
         return best_ind
 
-    # --- Destroy Operators ---
+    # Destroy Operators
     
     def _destroy_random(self, genome, k):
         # Indices to remove
@@ -1654,7 +1625,7 @@ class GA_Solver:
                 new_genome.append(city)
         return removed, new_genome
 
-    # --- Repair Operators ---
+    # Repair Operators 
     
     def _repair_regret(self, genome, removed, rho_bucket=None):
         """
