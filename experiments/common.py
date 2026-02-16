@@ -123,10 +123,10 @@ def run_solver_pipeline(problem, solver_class, solver_config=None, lns_config=No
     _, trips = solver.split_route(current_ind.genome, win_scale=None)
     
     # 5. Expand
-    action_list = solver.expand_solution_to_action_list(trips)
+    solution = solver.expand_solution(trips)
     
     # 6. Evaluate
-    final_cost = evaluate_solution(problem, action_list)
+    final_cost = evaluate_solution(problem, solution)
     
     runtime = time.perf_counter() - t0
     

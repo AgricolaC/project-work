@@ -64,13 +64,13 @@ def validate_encoded_solution(solution, n_nodes, expected_total_gold, golds_by_n
         
     return True, "Valid"
 
-def evaluate_solution(problem, action_list):
+def evaluate_solution(problem, solution):
     """
-    Evaluates the total cost of an action list using strict edge-by-edge charging.
+    Evaluates the total cost of a solution using strict edge-by-edge charging.
     
     Args:
         problem: The Problem instance
-        action_list: List of (node_id, gold_taken) tuples, e.g. [(0,0), (1, 10), (0,0)]
+        solution: List of (node_id, gold_taken) tuples, e.g. [(0,0), (1, 10), (0,0)]
         
     Returns:
         Total cost (float)
@@ -79,9 +79,9 @@ def evaluate_solution(problem, action_list):
     current_load = 0.0
     
     # Iterate through transitions (u -> v)
-    for i in range(len(action_list) - 1):
-        u, gold_u = action_list[i]
-        v, gold_v = action_list[i+1]
+    for i in range(len(solution) - 1):
+        u, gold_u = solution[i]
+        v, gold_v = solution[i+1]
         
        
         # problem.cost(path, w) -> "dist + (alpha * dist * weight) ** beta" 
@@ -95,7 +95,7 @@ def evaluate_solution(problem, action_list):
             current_load += gold_u
             
         if not problem.graph.has_edge(u, v):
-             raise ValueError(f"Invalid transition {u}->{v} in action list: Edge does not exist.")
+             raise ValueError(f"Invalid transition {u}->{v} in solution: Edge does not exist.")
             
         # Calculate cost for this single edge
         edge_cost = problem.cost([u, v], current_load)

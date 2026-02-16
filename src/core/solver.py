@@ -485,7 +485,7 @@ class GA_Solver:
     """
     @staticmethod
     @staticmethod
-    def get_budget(n_cities):
+    def get_budget(n_nodes):
         """
         Returns time budget parameters scaled inversely with problem size.
         Conservative scaling to penalize large instances and save compute.
@@ -493,19 +493,19 @@ class GA_Solver:
         # 1. Generations (GA)
         # Scale: 3000/N. Floor: 30.
         # N=20 -> 75. N=50 -> 30. N=100 -> 15.
-        max_gens = max(15, int(1500 / max(1, n_cities)))
+        max_gens = max(15, int(1500 / max(1, n_nodes)))
         
         # 2. LNS Iterations
         # Scale: 15000/N. Floor: 100.
         # N=20 -> 750. N=50 -> 300. N=100 -> 150.
-        lns_iters = max(100, int(15000 / max(1, n_cities)))
+        lns_iters = max(100, int(15000 / max(1, n_nodes)))
         
         # 3. Population Size
         # Previously constant 21. Now dynamic.
         # Scale: 600/N. Floor: 15. Cap: 50.
         # N=20 -> 60. N=50 -> 24. N=100 -> 12 (->15).
         # Small problems get denser checks, large problems minimal robust pop.
-        raw_pop = int(1200 / max(1, n_cities))
+        raw_pop = int(1200 / max(1, n_nodes))
         pop_size = max(15, min(50, raw_pop))
         
         return {
@@ -706,9 +706,9 @@ class GA_Solver:
 
 
 
-    def expand_solution_to_action_list(self, trips):
+    def expand_solution(self, trips):
         """
-        Expands a list of trips (sequences of pickup cities) into a full action list 
+        Expands a list of trips (sequences of pickup cities) into a full solution 
         that includes all intermediate transitive nodes visited.
         
         Args:
@@ -720,11 +720,11 @@ class GA_Solver:
             - Intermediate nodes have gold=0
             - Pickup nodes have gold=real_gold
         """
-        action_list = []
+        solution = []
         
         # Start at depot
         curr_node = 0
-        action_list.append((0, 0)) # Start
+        solution.append((0, 0)) # Start
         
         for trip in trips:
             # Trip is a sequence of target pickups: [t1, t2, ...]
@@ -799,11 +799,11 @@ class GA_Solver:
                     if node == 0:
                         taken_gold = 0 # Drop off
                         
-                    action_list.append((node, taken_gold))
+                    solution.append((node, taken_gold))
                     
                 curr_node = target
                 
-        return action_list
+        return solution
 
     def get_dist(self, u, v):
         return self.dist_matrix[u, v]
@@ -993,14 +993,14 @@ class GA_Solver:
         self._cached_rho_global = res
         return res
 
-    def compute_rho_solution(self, actions) -> float:
+    def compute_rho_solution(self, solution) -> float:
         """
-        Computes solution-aware rho using executed Action List.
+        Computes solution-aware rho using executed solution.
         Respects pickup semantics: load only increases at pickup nodes.
-        Expects actions = [(city, gold), ...] where consecutve tuples are EDGES.
+        Expects solution = [(city, gold), ...] where consecutve tuples are EDGES.
         For a direct edge, Sbeta = dist^beta.
         """
-        if not actions:
+        if not solution:
             return 0.0
             
         alpha = self.problem.alpha
@@ -1009,9 +1009,9 @@ class GA_Solver:
         log_rhos = []
         current_load = 0.0
         
-        for i in range(len(actions) - 1):
-            u_node, u_gold = actions[i]
-            v_node, v_gold = actions[i+1]
+        for i in range(len(solution) - 1):
+            u_node, u_gold = solution[i]
+            v_node, v_gold = solution[i+1]
             
             if u_node == 0:
                 current_load = 0.0 # Reset at depot
@@ -1044,14 +1044,14 @@ class GA_Solver:
         return float(np.exp(median_log_rho))
 
 
-    def describe_regime(self, trips=None, actions=None) -> dict:
+    def describe_regime(self, trips=None, solution=None) -> dict:
         """
         Determines the problem regime (Concave/Linear/Convex) and 
         Penalty Dominance (Distance/Mixed/Penalty).
         
         Args:
-            trips: Optional list of trips (will be expanded to actions if actions not provided).
-            actions: Optional action list [(city, gold), ...] for precise calculation.
+            trips: Optional list of trips (will be expanded to solution if solution not provided).
+            solution: Optional solution list [(city, gold), ...] for precise calculation.
             
         Returns:
             dict with keys: curvature, rho_global, rho_solution, rho_bucket, etc.
@@ -1064,12 +1064,12 @@ class GA_Solver:
         
         # 2. Solution Specific (precise)
         rho_s = None
-        if actions is not None:
-             rho_s = self.compute_rho_solution(actions)
+        if solution is not None:
+             rho_s = self.compute_rho_solution(solution)
         elif trips is not None:
-             # Expand trips to actions to get correct pickup semantics
-             actions = self.expand_solution_to_action_list(trips)
-             rho_s = self.compute_rho_solution(actions)
+             # Expand trips to solution to get correct pickup semantics
+             solution = self.expand_solution(trips)
+             rho_s = self.compute_rho_solution(solution)
              
         def bucket(rho):
             if rho is None: return None
