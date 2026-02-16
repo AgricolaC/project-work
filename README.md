@@ -1,4 +1,4 @@
-# Computational Intelligence Project - Golden VRP Solver
+# Computational Intelligence Project 
 
 This repository contains a Genetic Algorithm (GA) implementation designed to solve a variant of the Vehicle Routing Problem (VRP) where the cost function is non-linear and dependent on the carried load.
 
